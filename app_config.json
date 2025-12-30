@@ -2,9 +2,9 @@
   "appName": "Adaptive",
   "icon": {
     "type": "text",
-    "text": "A",
-    "backgroundColor": "#6200EE",
-    "textColor": "#FFFFFF",
+    "text": "ADV",
+    "backgroundColor": "#343434",
+    "textColor": "#00BFFF",
     "fontSize": 64,
     "fontStyle": "bold",
     "cornerRadius": 25
