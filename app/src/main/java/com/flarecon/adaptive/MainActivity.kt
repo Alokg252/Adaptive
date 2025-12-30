@@ -1,6 +1,8 @@
 package com.flarecon.adaptive
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Bundle
@@ -9,6 +11,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -19,6 +22,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -27,6 +31,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Home
@@ -41,6 +46,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -230,6 +236,80 @@ object SettingsManager {
             
             AppSettings(
                 url = url,
+                showHeader = json.optBoolean("showHeader", false),
+                headerTitle = json.optString("headerTitle", ""),
+                showSubtitle = json.optBoolean("showSubtitle", false),
+                subtitleText = json.optString("subtitleText", ""),
+                headerColorType = json.optString("headerColorType", "preset"),
+                headerColorPreset = json.optString("headerColorPreset", "default"),
+                headerColorCustom = json.optString("headerColorCustom", "#6200EE"),
+                headerSize = json.optString("headerSize", "medium"),
+                headerElevation = json.optBoolean("headerElevation", true),
+                headerOverlay = json.optBoolean("headerOverlay", false),
+                headerPaddingLeft = json.optInt("headerPaddingLeft", 4),
+                headerPaddingRight = json.optInt("headerPaddingRight", 4),
+                headerPaddingTop = json.optInt("headerPaddingTop", 0),
+                headerPaddingBottom = json.optInt("headerPaddingBottom", 0),
+                showRefreshButton = json.optBoolean("showRefreshButton", true),
+                showHomeButton = json.optBoolean("showHomeButton", false),
+                showBackButton = json.optBoolean("showBackButton", false),
+                websiteMarginTop = json.optInt("websiteMarginTop", 0),
+                websiteMarginBottom = json.optInt("websiteMarginBottom", 0),
+                websiteMarginLeft = json.optInt("websiteMarginLeft", 0),
+                websiteMarginRight = json.optInt("websiteMarginRight", 0),
+                backgroundColor = json.optString("backgroundColor", "#000000"),
+                showProgressBar = json.optBoolean("showProgressBar", true),
+                progressColorCustom = json.optString("progressColorCustom", "#6200EE"),
+                immersiveMode = json.optBoolean("immersiveMode", true),
+                allowZoom = json.optBoolean("allowZoom", true),
+                desktopMode = json.optBoolean("desktopMode", false)
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+    
+    // Export settings to pretty-printed JSON string
+    fun exportToJson(settings: AppSettings): String {
+        return JSONObject().apply {
+            put("url", settings.url ?: "")
+            put("showHeader", settings.showHeader)
+            put("headerTitle", settings.headerTitle)
+            put("showSubtitle", settings.showSubtitle)
+            put("subtitleText", settings.subtitleText)
+            put("headerColorType", settings.headerColorType)
+            put("headerColorPreset", settings.headerColorPreset)
+            put("headerColorCustom", settings.headerColorCustom)
+            put("headerSize", settings.headerSize)
+            put("headerElevation", settings.headerElevation)
+            put("headerOverlay", settings.headerOverlay)
+            put("headerPaddingLeft", settings.headerPaddingLeft)
+            put("headerPaddingRight", settings.headerPaddingRight)
+            put("headerPaddingTop", settings.headerPaddingTop)
+            put("headerPaddingBottom", settings.headerPaddingBottom)
+            put("showRefreshButton", settings.showRefreshButton)
+            put("showHomeButton", settings.showHomeButton)
+            put("showBackButton", settings.showBackButton)
+            put("websiteMarginTop", settings.websiteMarginTop)
+            put("websiteMarginBottom", settings.websiteMarginBottom)
+            put("websiteMarginLeft", settings.websiteMarginLeft)
+            put("websiteMarginRight", settings.websiteMarginRight)
+            put("backgroundColor", settings.backgroundColor)
+            put("showProgressBar", settings.showProgressBar)
+            put("progressColorCustom", settings.progressColorCustom)
+            put("immersiveMode", settings.immersiveMode)
+            put("allowZoom", settings.allowZoom)
+            put("desktopMode", settings.desktopMode)
+        }.toString(2) // Pretty print with 2-space indent
+    }
+    
+    // Import settings from JSON string
+    fun importFromJson(jsonString: String): AppSettings? {
+        return try {
+            val json = JSONObject(jsonString)
+            AppSettings(
+                url = json.optString("url", "").takeIf { it.isNotEmpty() },
                 showHeader = json.optBoolean("showHeader", false),
                 headerTitle = json.optString("headerTitle", ""),
                 showSubtitle = json.optBoolean("showSubtitle", false),
@@ -703,6 +783,44 @@ fun SettingsScreen(
             SettingsSwitch("Desktop Mode", "Request desktop version of sites", desktopMode) { desktopMode = it }
         }
 
+        // Config Manager Section
+        if (!isFirstSetup) {
+            ConfigManagerSection(
+                currentSettings = currentSettings,
+                onImportSettings = { importedSettings ->
+                    // Update all the state variables with imported values
+                    urlInput = importedSettings.url ?: ""
+                    showHeader = importedSettings.showHeader
+                    headerTitle = importedSettings.headerTitle
+                    showSubtitle = importedSettings.showSubtitle
+                    subtitleText = importedSettings.subtitleText
+                    headerColorType = importedSettings.headerColorType
+                    headerColorPreset = importedSettings.headerColorPreset
+                    headerColorCustom = importedSettings.headerColorCustom
+                    headerSize = importedSettings.headerSize
+                    headerElevation = importedSettings.headerElevation
+                    headerOverlay = importedSettings.headerOverlay
+                    headerPaddingLeft = importedSettings.headerPaddingLeft.toString()
+                    headerPaddingRight = importedSettings.headerPaddingRight.toString()
+                    headerPaddingTop = importedSettings.headerPaddingTop.toString()
+                    headerPaddingBottom = importedSettings.headerPaddingBottom.toString()
+                    showRefresh = importedSettings.showRefreshButton
+                    showHome = importedSettings.showHomeButton
+                    showBack = importedSettings.showBackButton
+                    websiteMarginTop = importedSettings.websiteMarginTop.toString()
+                    websiteMarginBottom = importedSettings.websiteMarginBottom.toString()
+                    websiteMarginLeft = importedSettings.websiteMarginLeft.toString()
+                    websiteMarginRight = importedSettings.websiteMarginRight.toString()
+                    backgroundColor = importedSettings.backgroundColor
+                    showProgress = importedSettings.showProgressBar
+                    progressColorCustom = importedSettings.progressColorCustom
+                    immersiveMode = importedSettings.immersiveMode
+                    allowZoom = importedSettings.allowZoom
+                    desktopMode = importedSettings.desktopMode
+                }
+            )
+        }
+
         Spacer(Modifier.height(24.dp))
 
         // Save Button
@@ -820,6 +938,198 @@ fun SettingsSwitch(title: String, subtitle: String, checked: Boolean, onCheckedC
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+fun ConfigManagerSection(
+    currentSettings: AppSettings,
+    onImportSettings: (AppSettings) -> Unit
+) {
+    val context = LocalContext.current
+    val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    var showJsonDialog by remember { mutableStateOf(false) }
+    var showImportDialog by remember { mutableStateOf(false) }
+    var importJsonText by remember { mutableStateOf("") }
+    var importError by remember { mutableStateOf<String?>(null) }
+    
+    SettingsCard("Config Manager") {
+        Text(
+            "Export and share your configuration with others, or import configs from friends",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+        
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Export Button
+            OutlinedButton(
+                onClick = {
+                    val jsonConfig = SettingsManager.exportToJson(currentSettings)
+                    val clip = ClipData.newPlainText("Adaptive Config", jsonConfig)
+                    clipboardManager.setPrimaryClip(clip)
+                    Toast.makeText(context, "Config copied to clipboard!", Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("📤 Export")
+            }
+            
+            // Import Button
+            OutlinedButton(
+                onClick = { 
+                    showImportDialog = true
+                    importJsonText = ""
+                    importError = null
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(Icons.Default.Add, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Import")
+            }
+        }
+        
+        Spacer(Modifier.height(8.dp))
+        
+        // View Config Button
+        TextButton(
+            onClick = { showJsonDialog = true },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Default.MoreVert, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("View Current Config")
+        }
+    }
+    
+    // View JSON Dialog
+    if (showJsonDialog) {
+        val jsonConfig = SettingsManager.exportToJson(currentSettings)
+        AlertDialog(
+            onDismissRequest = { showJsonDialog = false },
+            title = { Text("Current Configuration") },
+            text = {
+                Column {
+                    Text(
+                        "This is your current config in JSON format. You can copy it to share with others.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 300.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Column(
+                            Modifier
+                                .verticalScroll(rememberScrollState())
+                                .horizontalScroll(rememberScrollState())
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = jsonConfig,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val clip = ClipData.newPlainText("Adaptive Config", jsonConfig)
+                    clipboardManager.setPrimaryClip(clip)
+                    Toast.makeText(context, "Config copied!", Toast.LENGTH_SHORT).show()
+                    showJsonDialog = false
+                }) {
+                    Text("Copy & Close")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showJsonDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+    
+    // Import Dialog
+    if (showImportDialog) {
+        AlertDialog(
+            onDismissRequest = { showImportDialog = false },
+            title = { Text("Import Configuration") },
+            text = {
+                Column {
+                    Text(
+                        "Paste a JSON config below to import settings. This will update all fields in the settings screen.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    
+                    OutlinedTextField(
+                        value = importJsonText,
+                        onValueChange = { 
+                            importJsonText = it
+                            importError = null
+                        },
+                        label = { Text("Paste JSON Config") },
+                        placeholder = { Text("{ \"url\": \"...\", ... }") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 150.dp),
+                        isError = importError != null,
+                        supportingText = importError?.let { { Text(it, color = MaterialTheme.colorScheme.error) } },
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                    
+                    // Paste from clipboard button
+                    TextButton(
+                        onClick = {
+                            val clipData = clipboardManager.primaryClip
+                            if (clipData != null && clipData.itemCount > 0) {
+                                importJsonText = clipData.getItemAt(0).text?.toString() ?: ""
+                                importError = null
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Icon(Icons.Default.Add, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Paste from Clipboard")
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val imported = SettingsManager.importFromJson(importJsonText)
+                        if (imported != null) {
+                            onImportSettings(imported)
+                            Toast.makeText(context, "Config imported! Save to apply changes.", Toast.LENGTH_LONG).show()
+                            showImportDialog = false
+                        } else {
+                            importError = "Invalid JSON format. Please check and try again."
+                        }
+                    },
+                    enabled = importJsonText.isNotBlank()
+                ) {
+                    Text("Import")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showImportDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
