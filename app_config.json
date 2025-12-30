@@ -1,0 +1,12 @@
+{
+  "appName": "Adaptive",
+  "icon": {
+    "type": "text",
+    "text": "A",
+    "backgroundColor": "#6200EE",
+    "textColor": "#FFFFFF",
+    "fontSize": 64,
+    "fontStyle": "bold",
+    "cornerRadius": 25
+  }
+}
