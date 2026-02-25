@@ -1,11 +1,18 @@
 package com.flarecon.adaptive
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
+import android.util.Log
+import android.util.Size
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -14,11 +21,19 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -34,6 +49,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -44,8 +60,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -54,20 +72,227 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.toColorInt
 import com.flarecon.adaptive.ui.theme.AdaptiveTheme
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.Executors
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        private const val TAG = "Adaptive"
+    }
+    
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        
+        // Handle deep link
+        val importedSettings = handleDeepLink(intent)
+        
         setContent {
             AdaptiveTheme {
-                AdaptiveApp()
+                AdaptiveApp(importedSettings = importedSettings)
             }
+        }
+    }
+    
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Handle deep link when app is already running
+        val importedSettings = handleDeepLink(intent)
+        if (importedSettings != null) {
+            setContent {
+                AdaptiveTheme {
+                    AdaptiveApp(importedSettings = importedSettings)
+                }
+            }
+        }
+    }
+    
+    private fun handleDeepLink(intent: Intent?): AppSettings? {
+        if (intent?.action != Intent.ACTION_VIEW) return null
+        
+        val uri = intent.data ?: return null
+        Log.d(TAG, "Deep link received: $uri")
+        
+        if (uri.scheme != "adaptive" || uri.host != "import") {
+            Log.w(TAG, "Invalid scheme or host: ${uri.scheme}://${uri.host}")
+            return null
+        }
+        
+        val encodedData = uri.getQueryParameter("data")
+        if (encodedData.isNullOrEmpty()) {
+            Log.w(TAG, "No data parameter in deep link")
+            Toast.makeText(this, "Invalid QR code: no data", Toast.LENGTH_SHORT).show()
+            return null
+        }
+        
+        return try {
+            val settings = DeepLinkHandler.decodeConfig(encodedData)
+            if (settings != null) {
+                Log.i(TAG, "Successfully imported config via QR")
+                Toast.makeText(this, "Configuration imported!", Toast.LENGTH_SHORT).show()
+                // Save the imported settings
+                SettingsManager.saveSettings(this, settings)
+            }
+            settings
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode deep link data", e)
+            Toast.makeText(this, "Invalid QR code: ${e.message}", Toast.LENGTH_SHORT).show()
+            null
+        }
+    }
+}
+
+// Deep Link Handler for QR-based config sharing
+object DeepLinkHandler {
+    private const val TAG = "DeepLinkHandler"
+    
+    /**
+     * Encode settings to Base64 string for QR code
+     * Supports optional gzip compression for smaller QR codes
+     */
+    fun encodeConfig(settings: AppSettings, compress: Boolean = true): String {
+        val json = SettingsManager.exportToJson(settings)
+        Log.d(TAG, "Encoding config, JSON length: ${json.length}")
+        
+        return if (compress) {
+            // Gzip compress then Base64 encode
+            val compressed = gzipCompress(json)
+            Log.d(TAG, "Compressed size: ${compressed.size} bytes")
+            "gz:" + Base64.encodeToString(compressed, Base64.URL_SAFE or Base64.NO_WRAP)
+        } else {
+            Base64.encodeToString(json.toByteArray(Charsets.UTF_8), Base64.URL_SAFE or Base64.NO_WRAP)
+        }
+    }
+    
+    /**
+     * Decode Base64 config from QR code
+     * Supports both compressed (gz:) and uncompressed formats
+     */
+    fun decodeConfig(encoded: String): AppSettings? {
+        Log.d(TAG, "Decoding config, length: ${encoded.length}")
+        
+        val json = try {
+            if (encoded.startsWith("gz:")) {
+                // Gzip compressed
+                val compressed = Base64.decode(encoded.substring(3), Base64.URL_SAFE)
+                gzipDecompress(compressed)
+            } else {
+                // Plain Base64
+                String(Base64.decode(encoded, Base64.URL_SAFE), Charsets.UTF_8)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode Base64", e)
+            throw IllegalArgumentException("Invalid Base64 encoding")
+        }
+        
+        Log.d(TAG, "Decoded JSON length: ${json.length}")
+        
+        return try {
+            val settings = SettingsManager.importFromJson(json)
+            if (settings == null) {
+                throw IllegalArgumentException("Invalid config format")
+            }
+            
+            // Validate URL (allow http for localhost, require https otherwise)
+            val url = settings.url
+            if (url != null && !url.startsWith("https://") && 
+                !url.startsWith("http://localhost") && 
+                !url.startsWith("http://127.0.0.1") &&
+                !url.startsWith("http://10.0.2.2")) {
+                Log.w(TAG, "URL validation: $url")
+                // Don't reject, just warn - user can decide
+            }
+            
+            settings
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse JSON config", e)
+            throw IllegalArgumentException("Invalid JSON: ${e.message}")
+        }
+    }
+    
+    /**
+     * Generate deep link URL for sharing
+     */
+    fun generateDeepLink(settings: AppSettings, compress: Boolean = true): String {
+        val encoded = encodeConfig(settings, compress)
+        return "adaptive://import?data=$encoded"
+    }
+    
+    private fun gzipCompress(data: String): ByteArray {
+        val bos = ByteArrayOutputStream()
+        GZIPOutputStream(bos).use { gzip ->
+            gzip.write(data.toByteArray(Charsets.UTF_8))
+        }
+        return bos.toByteArray()
+    }
+    
+    private fun gzipDecompress(compressed: ByteArray): String {
+        ByteArrayInputStream(compressed).use { bis ->
+            GZIPInputStream(bis).use { gzip ->
+                return gzip.bufferedReader(Charsets.UTF_8).readText()
+            }
+        }
+    }
+}
+
+// QR Code Generator Helper
+object QrCodeGenerator {
+    private const val TAG = "QrCodeGenerator"
+    
+    /**
+     * Generate QR code bitmap from string content
+     */
+    fun generateQrBitmap(content: String, size: Int = 512): Bitmap? {
+        return try {
+            val hints = mapOf(
+                EncodeHintType.MARGIN to 1,
+                EncodeHintType.CHARACTER_SET to "UTF-8"
+            )
+            
+            val bitMatrix = QRCodeWriter().encode(
+                content,
+                BarcodeFormat.QR_CODE,
+                size,
+                size,
+                hints
+            )
+            
+            val width = bitMatrix.width
+            val height = bitMatrix.height
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            
+            for (x in 0 until width) {
+                for (y in 0 until height) {
+                    bitmap.setPixel(
+                        x, y,
+                        if (bitMatrix.get(x, y)) android.graphics.Color.BLACK
+                        else android.graphics.Color.WHITE
+                    )
+                }
+            }
+            
+            Log.d(TAG, "Generated QR code bitmap: ${width}x${height}")
+            bitmap
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to generate QR code", e)
+            null
         }
     }
 }
@@ -390,14 +615,21 @@ fun parseColor(hex: String, default: Color = Color.Black): Color {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AdaptiveApp() {
+fun AdaptiveApp(importedSettings: AppSettings? = null) {
     val context = LocalContext.current
-    var settings by remember { mutableStateOf(SettingsManager.loadSettings(context)) }
+    var settings by remember { mutableStateOf(importedSettings ?: SettingsManager.loadSettings(context)) }
     var showSettings by remember { mutableStateOf(settings.url == null) }
     var webView: WebView? by remember { mutableStateOf(null) }
     var isLoading by remember { mutableStateOf(false) }
     var loadingProgress by remember { mutableIntStateOf(0) }
     var showMenu by remember { mutableStateOf(false) }
+    
+    // Show toast if config was imported via QR
+    LaunchedEffect(importedSettings) {
+        if (importedSettings != null) {
+            showSettings = false // Go directly to WebView if config was imported
+        }
+    }
 
     BackHandler(enabled = webView?.canGoBack() == true && !showSettings) {
         webView?.goBack()
@@ -950,6 +1182,8 @@ fun ConfigManagerSection(
     val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     var showJsonDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
+    var showQrCodeDialog by remember { mutableStateOf(false) }
+    var showQrScanner by remember { mutableStateOf(false) }
     var importJsonText by remember { mutableStateOf("") }
     var importError by remember { mutableStateOf<String?>(null) }
     
@@ -995,6 +1229,38 @@ fun ConfigManagerSection(
         
         Spacer(Modifier.height(8.dp))
         
+        // QR Code Row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Generate QR Code Button
+            Button(
+                onClick = { showQrCodeDialog = true },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            ) {
+                Text("📱 Show QR")
+            }
+            
+            // Scan QR Code Button
+            Button(
+                onClick = { showQrScanner = true },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            ) {
+                Text("📷 Scan QR")
+            }
+        }
+        
+        Spacer(Modifier.height(4.dp))
+        
         // View Config Button
         TextButton(
             onClick = { showJsonDialog = true },
@@ -1003,6 +1269,150 @@ fun ConfigManagerSection(
             Icon(Icons.Default.MoreVert, null, Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
             Text("View Current Config")
+        }
+    }
+    
+    // QR Scanner Dialog
+    if (showQrScanner) {
+        QrScannerDialog(
+            onDismiss = { showQrScanner = false },
+            onQrScanned = { scannedData ->
+                showQrScanner = false
+                
+                // Parse the scanned QR - could be deep link or just data
+                val data = when {
+                    scannedData.startsWith("adaptive://import?data=") -> {
+                        scannedData.substringAfter("data=")
+                    }
+                    scannedData.startsWith("gz:") || scannedData.startsWith("ey") -> {
+                        // Direct encoded data
+                        scannedData
+                    }
+                    else -> {
+                        Toast.makeText(context, "Invalid QR code format", Toast.LENGTH_SHORT).show()
+                        return@QrScannerDialog
+                    }
+                }
+                
+                try {
+                    val settings = DeepLinkHandler.decodeConfig(data)
+                    if (settings != null) {
+                        onImportSettings(settings)
+                        SettingsManager.saveSettings(context, settings)
+                        Toast.makeText(context, "Config imported via QR!", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "Invalid config in QR code", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Failed to import: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+    
+    // QR Code Display Dialog
+    if (showQrCodeDialog) {
+        val deepLink = remember(currentSettings) { 
+            DeepLinkHandler.generateDeepLink(currentSettings, compress = true) 
+        }
+        val qrBitmap = remember(deepLink) {
+            QrCodeGenerator.generateQrBitmap(deepLink, 512)
+        }
+        
+        Dialog(
+            onDismissRequest = { showQrCodeDialog = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        "Share Config QR Code",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                    
+                    Spacer(Modifier.height(8.dp))
+                    
+                    Text(
+                        "Scan this QR code with another device running Adaptive to import your config",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    
+                    Spacer(Modifier.height(16.dp))
+                    
+                    // QR Code Image
+                    if (qrBitmap != null) {
+                        Surface(
+                            modifier = Modifier.size(280.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color.White
+                        ) {
+                            Image(
+                                bitmap = qrBitmap.asImageBitmap(),
+                                contentDescription = "QR Code",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(8.dp)
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(280.dp)
+                                .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "Failed to generate QR code",
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                    
+                    Spacer(Modifier.height(16.dp))
+                    
+                    Text(
+                        "Data size: ${deepLink.length} characters",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    
+                    Spacer(Modifier.height(16.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val clip = ClipData.newPlainText("Adaptive QR Link", deepLink)
+                                clipboardManager.setPrimaryClip(clip)
+                                Toast.makeText(context, "Link copied!", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Copy Link")
+                        }
+                        
+                        Button(
+                            onClick = { showQrCodeDialog = false },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Close")
+                        }
+                    }
+                }
+            }
         }
     }
     
@@ -1175,6 +1585,199 @@ fun WebViewScreen(
         },
         modifier = Modifier.fillMaxSize()
     )
+}
+
+// QR Scanner Composable with CameraX + MLKit
+@Composable
+fun QrScannerDialog(
+    onDismiss: () -> Unit,
+    onQrScanned: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var hasCameraPermission by remember { 
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    var scanError by remember { mutableStateOf<String?>(null) }
+    var hasScanned by remember { mutableStateOf(false) }
+    
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCameraPermission = granted
+        if (!granted) {
+            scanError = "Camera permission is required to scan QR codes"
+        }
+    }
+    
+    LaunchedEffect(Unit) {
+        if (!hasCameraPermission) {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+    
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Scan QR Code",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, "Close")
+                    }
+                }
+                
+                // Camera Preview or Error
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .clip(RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (!hasCameraPermission) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                scanError ?: "Camera permission required",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(Modifier.height(16.dp))
+                            Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
+                                Text("Grant Permission")
+                            }
+                        }
+                    } else {
+                        // Camera Preview
+                        AndroidView(
+                            factory = { ctx ->
+                                val previewView = PreviewView(ctx).apply {
+                                    layoutParams = ViewGroup.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                                }
+                                
+                                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                                cameraProviderFuture.addListener({
+                                    val cameraProvider = cameraProviderFuture.get()
+                                    
+                                    val preview = Preview.Builder()
+                                        .build()
+                                        .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                                    
+                                    val barcodeScanner = BarcodeScanning.getClient()
+                                    val analysisExecutor = Executors.newSingleThreadExecutor()
+                                    
+                                    val imageAnalysis = ImageAnalysis.Builder()
+                                        .setTargetResolution(Size(1280, 720))
+                                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                        .build()
+                                        .also { analysis ->
+                                            analysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                                                @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
+                                                val mediaImage = imageProxy.image
+                                                if (mediaImage != null && !hasScanned) {
+                                                    val image = InputImage.fromMediaImage(
+                                                        mediaImage,
+                                                        imageProxy.imageInfo.rotationDegrees
+                                                    )
+                                                    
+                                                    barcodeScanner.process(image)
+                                                        .addOnSuccessListener { barcodes ->
+                                                            for (barcode in barcodes) {
+                                                                if (barcode.valueType == Barcode.TYPE_TEXT || 
+                                                                    barcode.valueType == Barcode.TYPE_URL) {
+                                                                    barcode.rawValue?.let { value ->
+                                                                        if (!hasScanned) {
+                                                                            hasScanned = true
+                                                                            onQrScanned(value)
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        .addOnCompleteListener {
+                                                            imageProxy.close()
+                                                        }
+                                                } else {
+                                                    imageProxy.close()
+                                                }
+                                            }
+                                        }
+                                    
+                                    try {
+                                        cameraProvider.unbindAll()
+                                        cameraProvider.bindToLifecycle(
+                                            lifecycleOwner,
+                                            CameraSelector.DEFAULT_BACK_CAMERA,
+                                            preview,
+                                            imageAnalysis
+                                        )
+                                    } catch (e: Exception) {
+                                        Log.e("QrScanner", "Camera binding failed", e)
+                                    }
+                                }, ContextCompat.getMainExecutor(ctx))
+                                
+                                previewView
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        
+                        // Scanner overlay frame
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(250.dp)
+                                    .border(3.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp))
+                            )
+                        }
+                    }
+                }
+                
+                // Instructions
+                Text(
+                    "Point your camera at an Adaptive QR code",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+        }
+    }
 }
 
 fun formatUrl(url: String): String {
